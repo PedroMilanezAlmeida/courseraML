@@ -3,33 +3,148 @@ title: "Prediction Assignment Writeup"
 author: "PMA"
 date: "1/7/2020"
 output: html_document
-knit: (function(input_file, encoding) {
-  out_dir <- 'docs';
-  rmarkdown::render(input_file,
- encoding=encoding,
- output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Goal
+In general, to develop methods that tell how well an exercise is performed. In this case, the goal was to predict which variant of the the Unilateral Dumbbell Biceps Curl was performed by the study participants.
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+The data is from accelerometers on the belt, forearm, arm, and dumbell of 6 participants performing  barbell lifts correctly and incorrectly in 5 different ways (one was the correct for, four were not). More info: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+## Specific tasks:
+Describe:
 
-```{r cars}
-summary(cars)
+1) how the model was built
+
+2) how crossvalidation was used
+
+3) the expected out of sample error
+
+4) why the choices were made
+
+5) predict 20 different test cases.
+
+## Model building
+```{r}
+#get training and test data
+trainURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+trainFile <- basename(trainURL)
+testURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+testFile <- basename(testURL)
+
+if(!file.exists(trainFile)) download.file(trainURL, destfile = trainFile)
+trainSet <- read.csv(trainFile)
+if(!file.exists(testFile)) download.file(testURL, destfile = testFile)
+testSet  <- read.csv(testFile)
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r eval = FALSE}
+#not run to save space
+head(trainSet)
+summary(trainSet)
+dim(trainSet)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Eliminate columns that contains NA, are empty or apparently non-informative.
+```{r, message = FALSE}
+library(dplyr)
+trainSet <- trainSet[,!apply(trainSet, 
+                             2, 
+                             function(variable) 
+                               any(is.na(variable)))]
+trainSet <- trainSet[,!apply(trainSet, 
+                             2, 
+                             function(variable) 
+                               any(variable == ""))]
+trainSet <- select(.data = trainSet, -c("X",
+                                        "cvtd_timestamp",
+                                        "new_window"))
+```
+
+Data on how well the exercises were performed are stored in the "classe" variable.
+
+Importantly, the assignment states specifically that one may use any of the variables to predict with.
+
+Since each of the 6 participants performed a set of 10 repetitions of each exercise variant, the best way to classify the exercise variants could be by using the timestamp of the accelerometers together with the name of each participant as predictors. The following plot illustrate this point:
+```{r, message = FALSE}
+library(plotly)
+plot_ly(x = trainSet$raw_timestamp_part_1,
+        y = trainSet$classe,
+        z = trainSet$user_name)
+```
+
+Since the data clearly follow a non-linear pattern, and since there are only two predictors, the best way to split the prediction space would be using a decision tree. Therefore, a classification model using the rpart package was trained.
+
+```{r, message = FALSE}
+library(caret)
+#split training set into 80% training data and 20% validation data
+set.seed(2020)
+validSamples <- createFolds(trainSet$classe,
+                            k = 5,
+                            list = TRUE)[[1]]
+validSet <- trainSet[validSamples,]
+trainSet <- trainSet[-validSamples,]
+dim(validSet); dim(trainSet)
+#set training parameters to 5k crossvalidation but otherwise default
+tc <- trainControl("cv",
+                   5)
+#actual training
+(train.rpart <- train(classe ~ user_name + raw_timestamp_part_1, 
+                      data = trainSet, 
+                      method = "rpart",
+                      trControl = tc))
+```
+
+At the selected pruning hyperparameter cp, in-sample accuracy and kappa were very high, more than 99%. Hopefully these good results are not due to overfitting. To estimate out-of-sample accuracy, the validation data was used:
+```{r}
+confusionMatrix(validSet$classe,
+                predict(train.rpart, newdata = validSet))
+```
+
+The estimate for out-of-sample accuracy was also very high: 99.2% (CI = 98.9%-99.5%). Kappa was 99.0%.
+
+These results provide evidence that the model is highly predictive for out-of-sample observation. These are the predictions for the test data:
+```{r}
+predict(train.rpart, newdata = testSet)
+```
+
+## Prediction using actual positional data
+For those who did not like the idea of using time to predict exercise variant, the positional data from the accelerometers can also be used.
+
+In this case, since there are so many variables that probably, and since they probably do not vary with "classe" in a linear fashion, it might be better to consider a more complex model that takes into consideration the danger of overfitting associated with decision trees. Therefore, random forest was used, whih are basically a aggregation of decision trees that reduce variance without substantially increasing bias.
+
+```{r, message = FALSE}
+#eliminate not used variables
+trainSet <- select(trainSet, -c("user_name",
+                                "raw_timestamp_part_1",
+                                "raw_timestamp_part_2",
+                                "num_window"))
+dim(trainSet)
+
+#train rf model using same choices as above but on a parallel backend
+library(doParallel); registerDoParallel(detectCores())
+if(file.exists("train.rf.rds")){
+  train.rf <- readRDS("train.rf.rds")
+  } else {
+    (train.rf <- train(classe ~ ., 
+                      data = trainSet, 
+                      method = "rf",
+                      trControl = tc,
+                      allowParallel = TRUE))
+    saveRDS(train.rf, "train.rf.rds")
+    }
+#evaluate out-of-sample performance
+confusionMatrix(validSet$classe,
+                predict(train.rf,
+                        newdata = validSet))
+```
+
+Both in-sample and out-of-sample accuracy are very high, with values of accuracy and kappa higher than 99%. These are the predictions for the test data, this time using the model that does not take time into consideration.
+
+```{r}
+predict(train.rf, newdata = testSet)
+saveRDS(predict(train.rf, newdata = testSet), "predict.rds")
+```

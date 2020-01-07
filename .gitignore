@@ -1,3 +1,9 @@
+#.Rproj file
+.Rproj
+
+# Dataset
+.csv
+
 # History files
 .Rhistory
 .Rapp.history
